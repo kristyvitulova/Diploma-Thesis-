@@ -59,12 +59,12 @@ for idx, data_file in enumerate(gwf_files, 1):
             whitened_data = whiten(segment, f_psd, psd, sample_rate)
 
             f, t, Sxx = spectrogram(whitened_data, fs=sample_rate, nperseg=nperseg, noverlap=noverlap)
-            Sxx = Sxx[:256, :31]
+            Sxx = Sxx[:256, :32]
             Sxx = np.log1p(Sxx)
             Sxx = (Sxx - Sxx.min()) / (Sxx.max() - Sxx.min())
 
             Sxx_resized = torch.tensor(Sxx, dtype=torch.float32).unsqueeze(0)
-            assert Sxx_resized.shape == (1, 256, 31), f"Unexpected spectrogram shape: {Sxx_resized.shape}"
+            assert Sxx_resized.shape == (1, 256, 32), f"Unexpected spectrogram shape: {Sxx_resized.shape}"
 
             tensor_file = os.path.join(output_folder, f"{int(start_time_segment)}-{int(end_time_segment)}.pt")
             torch.save(Sxx_resized, tensor_file)
