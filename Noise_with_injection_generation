@@ -1,0 +1,94 @@
+#injecting waves into noise 
+# Output directory for saving injection spectrograms
+output_folder = "/home/kristyna/Desktop/spectrograms_injection_noise1e"
+os.makedirs(output_folder, exist_ok=True)
+
+# Spectrogram parameters
+nperseg = 512         # Number of points per segment for spectrogram computation
+noverlap = 256        # Overlap between segments
+sample_rate = 4096    # Sampling frequency in Hz
+segment_duration = 2  # Duration of each segment in seconds (2 sec = 8192 samples)
+segment_length = int(sample_rate * segment_duration)
+
+# White noise parameters (set sigma to 1.0e-21)
+noise_sigma = 1.0e-21
+
+# Number of spectrograms to generate
+num_spectrograms = 2000
+
+for i in range(num_spectrograms):
+    # Generate a white noise segment
+    white_noise = np.random.normal(0, noise_sigma, segment_length)
+    
+    # Compute spectrogram of pure white noise to determine normalization parameters
+    f_spec, t_spec, Sxx_noise = spectrogram(white_noise, fs=sample_rate, nperseg=nperseg, noverlap=noverlap)
+    Sxx_noise_log = np.log1p(Sxx_noise)
+    noise_min = Sxx_noise_log.min()
+    noise_max = Sxx_noise_log.max()
+    
+    # Generate random masses between 200 and 500 solar masses:
+    m1 = np.random.uniform(200, 500)
+    m2 = np.random.uniform(200, m1)  # Ensure m2 <= m1
+
+    # Generate the gravitational wave (GW) waveform with random masses
+    hp, hc = get_td_waveform(
+        approximant="IMRPhenomD",
+        mass1=m1, mass2=m2,
+        delta_t=1/sample_rate,
+        f_lower=10,
+        distance=1000  # 1 Gpc
+    )
+    gw_waveform = hp.numpy()
+    
+    # If the GW waveform is longer than the noise segment, trim it (take the center portion)
+    if len(gw_waveform) > segment_length:
+        start_trim = (len(gw_waveform) - segment_length) // 2
+        gw_wave = gw_waveform[start_trim: start_trim + segment_length]
+    else:
+        gw_wave = gw_waveform.copy()  # Use natural length if shorter
+    
+    gw_length = len(gw_wave)  # Natural length of the GW waveform
+    
+    # --- Shifting the GW waveform ---
+    # Find the peak position (using absolute value)
+    peak_position = np.argmax(np.abs(gw_wave))
+    
+    # Choose a new peak location within the natural GW waveform length (between 10% and 90%)
+    min_index = int(gw_length * 0.1)
+    max_index = int(gw_length * 0.9)
+    new_peak_position = np.random.randint(min_index, max_index) if max_index > min_index else gw_length // 2
+    
+    # Compute the shift and roll the GW waveform so that its peak moves to the new position
+    shift = new_peak_position - peak_position
+    shifted_gw_wave = np.roll(gw_wave, shift)
+    
+    # --- Injection without scaling ---
+    # Choose a random injection index in the white noise such that the entire GW waveform fits
+    injection_index = np.random.randint(0, segment_length - gw_length + 1)
+    injected_signal = white_noise.copy()
+    injected_signal[injection_index:injection_index + gw_length] += shifted_gw_wave
+    
+    # Compute the spectrogram of the injected signal
+    f_spec, t_spec, Sxx_injected = spectrogram(injected_signal, fs=sample_rate, nperseg=nperseg, noverlap=noverlap)
+    Sxx_injected_log = np.log1p(Sxx_injected)
+    
+    # Normalize the injected spectrogram using the normalization parameters from pure noise
+    if noise_max != noise_min:
+        Sxx_normalized = (Sxx_injected_log - noise_min) / (noise_max - noise_min)
+    else:
+        Sxx_normalized = Sxx_injected_log
+
+    # Optionally omezit hodnoty na rozsah [0, 1]
+    Sxx_normalized = np.clip(Sxx_normalized, 0, 1)
+    
+    # Convert spectrogram to a PyTorch tensor and resize to (256, 31)
+    Sxx_tensor = torch.tensor(Sxx_normalized, dtype=torch.float32).unsqueeze(0)
+    Sxx_tensor = F.interpolate(Sxx_tensor.unsqueeze(0), size=(256, 31), mode='bilinear', align_corners=False).squeeze(0)
+    
+    # Save the spectrogram tensor
+    file_name = os.path.join(output_folder, f"spectrogram_injection_{i:03d}.pt")
+    torch.save(Sxx_tensor, file_name)
+    
+    print(f"Saved injection spectrogram {i+1}/{num_spectrograms}")
+
+print("Finished generating injection spectrograms.")
