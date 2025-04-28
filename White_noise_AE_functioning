@@ -1,0 +1,75 @@
+# Base directory containing noise data
+base_data_dir = "/home/kristyna/Desktop/ET_noise_data"
+channel = "E1:STRAIN"
+
+# Output directory
+output_folder = "/home/kristyna/Desktop/ET_spectrograms_noise_log1"
+os.makedirs(output_folder, exist_ok=True)
+
+# Spectrogram parameters
+nperseg = 512
+noverlap = 256
+sample_rate = 4096
+segment_duration = 2
+
+# High-pass filter
+def highpass_filter(data, cutoff=20, fs=sample_rate, order=4):
+    nyq = 0.5 * fs
+    normal_cutoff = cutoff / nyq
+    b, a = butter(order, normal_cutoff, btype='high', analog=False)
+    return filtfilt(b, a, data)
+
+# Whitening
+def whiten(data, f_psd, psd, fs):
+    if np.any(psd <= 0):
+        psd = np.maximum(psd, 1e-20)
+    freqs = np.fft.fftfreq(len(data), d=1/fs)
+    psd_interp = np.interp(freqs, f_psd, psd)
+    white_fft = fft(data) / np.sqrt(psd_interp)
+    return np.real(ifft(white_fft))
+
+# List all .gwf files first
+gwf_files = []
+for root, _, files in os.walk(base_data_dir):
+    for file in sorted(files):
+        if file.endswith(".gwf"):
+            gwf_files.append(os.path.join(root, file))
+
+total_files = len(gwf_files)
+print(f"Found {total_files} .gwf files to process.")
+
+# Process each GWF file
+for idx, data_file in enumerate(gwf_files, 1):
+    print(f"[{idx}/{total_files}] Processing file: {data_file}")
+
+    try:
+        strain = TimeSeries.read(data_file, channel=channel)
+        f_psd, psd = welch(strain.value, fs=sample_rate, nperseg=sample_rate * segment_duration)
+
+        num_segments = int((strain.times.value[-1] - strain.times.value[0]) // segment_duration)
+
+        for i in range(num_segments):
+            start_time_segment = strain.times.value[0] + i * segment_duration
+            end_time_segment = start_time_segment + segment_duration
+            if end_time_segment > strain.times.value[-1]:
+                break
+
+            segment = strain.crop(start_time_segment, end_time_segment).value
+            segment = highpass_filter(segment)
+            whitened_data = whiten(segment, f_psd, psd, sample_rate)
+
+            f, t, Sxx = spectrogram(whitened_data, fs=sample_rate, nperseg=nperseg, noverlap=noverlap)
+            Sxx = Sxx[:256, :31]
+            Sxx = np.log1p(Sxx)
+            Sxx = (Sxx - Sxx.min()) / (Sxx.max() - Sxx.min())
+
+            Sxx_resized = torch.tensor(Sxx, dtype=torch.float32).unsqueeze(0)
+            assert Sxx_resized.shape == (1, 256, 31), f"Unexpected spectrogram shape: {Sxx_resized.shape}"
+
+            tensor_file = os.path.join(output_folder, f"{int(start_time_segment)}-{int(end_time_segment)}.pt")
+            torch.save(Sxx_resized, tensor_file)
+
+    except Exception as e:
+        print(f"Error processing {data_file}: {e}")
+
+print("All files processed.")
