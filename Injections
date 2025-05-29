@@ -1,0 +1,114 @@
+# === Nastavení ===
+base_data_dir = "/home/kristyna/Desktop/ET_noise_final_injections/Noise50_100"
+channel = "E1:STRAIN"
+sample_rate = 8192
+segment_duration = 2
+segment_length = sample_rate * segment_duration
+
+output_folder = "/home/kristyna/Desktop/ET_noise_final_injections/Noise50_100/injection_3000_5000Mpc"
+os.makedirs(output_folder, exist_ok=True)
+batch_size = 1000
+
+# === Highpass filtr ===
+def highpass_filter(data, cutoff=20, fs=sample_rate, order=6):
+    nyq = 0.5 * fs
+    normal_cutoff = cutoff / nyq
+    b, a = butter(order, normal_cutoff, btype='high')
+    return filtfilt(b, a, data)
+
+# === Whitening ===
+def whiten(data, f_psd, psd, fs):
+    psd = np.maximum(psd, 1e-20)
+    freqs = np.fft.fftfreq(len(data), d=1/fs)
+    psd_interp = np.interp(freqs, f_psd, psd)
+    white_fft = fft(data) / np.sqrt(psd_interp)
+    return np.real(ifft(white_fft))
+
+# === Načtení GWF souborů ===
+gwf_files = sorted([
+    os.path.join(root, file)
+    for root, _, files in os.walk(base_data_dir)
+    for file in files if file.endswith(".gwf")
+])
+
+print(f"Found {len(gwf_files)} .gwf files.")
+
+current_batch = []
+batch_counter = 0
+
+for data_file in gwf_files:
+    try:
+        strain = TimeSeries.read(data_file, channel=channel)
+        full_data = strain.value
+
+        # Výpočet PSD z celého souboru, ne z každého segmentu
+        f_psd, psd = welch(full_data, fs=sample_rate, nperseg=sample_rate * 4)
+        num_segments = int((strain.times.value[-1] - strain.times.value[0]) // segment_duration)
+
+        for i in range(num_segments):
+            start = strain.times.value[0] + i * segment_duration
+            end = start + segment_duration
+            if end > strain.times.value[-1]:
+                break
+
+            segment = strain.crop(start, end).value.copy()
+            injected_segment = segment.copy()
+
+            # === Vlnová injekce ===
+            m1 = np.random.uniform(50, 100)
+            m2 = np.random.uniform(max(0.2 * m1, 50), m1)
+            distance = np.random.uniform(3000, 5000)
+
+            hp, _ = get_td_waveform(
+                approximant="IMRPhenomD",
+                mass1=m1, mass2=m2,
+                delta_t=1 / sample_rate,
+                f_lower=5,
+                distance=distance,
+                spin1z=0.0, spin2z=0.0,
+                eccentricity=0.0,
+                inclination=0.0
+            )
+
+            gw_tensor = torch.tensor(hp.numpy(), dtype=torch.float32)
+            peak = torch.argmax(gw_tensor).item()
+            new_peak = np.random.randint(int(0.2 * segment_length), int(0.8 * segment_length))
+            shift = new_peak - peak
+            gw_tensor = torch.roll(gw_tensor, shifts=shift)
+
+            start_idx = max(0, new_peak - segment_length // 2)
+            end_idx = start_idx + segment_length
+            gw_tensor = gw_tensor[start_idx:end_idx]
+
+            if len(gw_tensor) < segment_length:
+                gw_tensor = F.pad(gw_tensor, (0, segment_length - len(gw_tensor)))
+
+            # Tapering pomocí Tukeyova okna pro plynulý začátek a konec
+            taper = tukey(segment_length, alpha=0.2)
+            gw_tapered = gw_tensor.numpy() * taper
+
+            gw_filtered = highpass_filter(gw_tapered)
+            injected_segment += gw_filtered
+
+            whitened = whiten(injected_segment, f_psd, psd, sample_rate)
+            whitened_tensor = torch.tensor(whitened, dtype=torch.float32).unsqueeze(0)
+            current_batch.append(whitened_tensor)
+
+            if len(current_batch) >= batch_size:
+                batch_tensor = torch.cat(current_batch, dim=0)
+                save_path = os.path.join(output_folder, f"spec_batch_{batch_counter:03d}.pt")
+                torch.save(batch_tensor, save_path)
+                print(f"Saved batch {batch_counter} with {len(current_batch)} segments")
+                batch_counter += 1
+                current_batch = []
+
+    except Exception as e:
+        print(f"Error processing {data_file}: {e}")
+
+if current_batch:
+    batch_tensor = torch.cat(current_batch, dim=0)
+    save_path = os.path.join(output_folder, f"spec_batch_{batch_counter:03d}.pt")
+    torch.save(batch_tensor, save_path)
+    print(f"Saved final batch {batch_counter} with {len(current_batch)} segments")
+
+print("Done.")
