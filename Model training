@@ -1,12 +1,51 @@
+import os
+import time
 import torch
-import torch.nn as nn
-import torch.optim as optim
+import numpy as np
+import matplotlib.pyplot as plt
+from torch import nn, optim
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.model_selection import train_test_split
+from scipy.signal import stft
 
-# --- Model Definition with tuned dropout ---
+# --------------------------
+# Spectrogram Utils
+# --------------------------
+def compute_spectrogram(waveform, nperseg=512, noverlap=256):
+    f, t, Zxx = stft(waveform, nperseg=nperseg, noverlap=noverlap, fs=4096)
+    spec = np.abs(Zxx)
+    if spec.shape[1] > 4:
+        spec = spec[:, 1:-1]
+    return spec
+
+def preprocess_waveforms_to_spectrograms(waveforms):
+    processed = []
+    for waveform in waveforms:
+        spectrogram = compute_spectrogram(waveform.numpy())
+        min_val, max_val = np.min(spectrogram), np.max(spectrogram)
+        if max_val > min_val:
+            spectrogram = (spectrogram - min_val) / (max_val - min_val)
+        else:
+            spectrogram = np.zeros_like(spectrogram)
+        processed.append(spectrogram)
+    return torch.tensor(processed, dtype=torch.float32)
+
+def load_all_from_folder(folder_path):
+    all_waveforms = []
+    for filename in os.listdir(folder_path):
+        if filename.endswith('.pt'):
+            data = torch.load(os.path.join(folder_path, filename))
+            waveforms = data.get('waveforms', data) if isinstance(data, dict) else data
+            all_waveforms.append(waveforms)
+    return torch.cat(all_waveforms)
+
+# --------------------------
+# Model Definition (Trial 13)
+# --------------------------
 class DeeperAutoencoderWithRegularization(nn.Module):
     def __init__(self):
         super().__init__()
-        d = 0.07915602034842056  # dropout from trial 14
+        d = 0.08028083975596854
         self.conv1 = nn.Conv2d(1, 32, 3, padding=1)
         self.bn1 = nn.BatchNorm2d(32)
         self.drop1 = nn.Dropout(d)
@@ -45,24 +84,49 @@ class DeeperAutoencoderWithRegularization(nn.Module):
         x = self.unpool3(x, i1, output_size=orig); x = self.deconv3(x)
         return x
 
-# --- Training ---
+# --------------------------
+# Load and Prepare Data
+# --------------------------
+noise_folder = "/home/kristyna/Desktop/ET_segments_waveforms_final_cutoff0"
+raw_waveforms = load_all_from_folder(noise_folder)
+spectrograms = preprocess_waveforms_to_spectrograms(raw_waveforms)
+spectrograms = torch.nn.functional.interpolate(spectrograms.unsqueeze(1), size=(256, 31))
+
+train_data, temp_data = train_test_split(spectrograms, test_size=0.3, random_state=42)
+val_data, test_data = train_test_split(temp_data, test_size=0.5, random_state=42)
+
+train_loader = DataLoader(TensorDataset(train_data), batch_size=16, shuffle=True)
+val_loader = DataLoader(TensorDataset(val_data), batch_size=16, shuffle=False)
+test_loader = DataLoader(TensorDataset(test_data), batch_size=32, shuffle=False)
+
+# --------------------------
+# Training Setup
+# --------------------------
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = DeeperAutoencoderWithRegularization().to(device)
-
+criterion = nn.MSELoss()
 optimizer = optim.Adam(
     model.parameters(),
-    lr=4.741390686132914e-05,
-    weight_decay=2.9103837006459895e-06
+    lr=0.0005950527652410784,
+    weight_decay=7.216242101650261e-07
 )
-criterion = nn.MSELoss()
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode='min', factor=0.1, patience=3, verbose=True
+)
 
-num_epochs = 65
+# --------------------------
+# Training Loop
+# --------------------------
+start_time = time.time()
+
+num_epochs = 70
 train_losses, val_losses = [], []
+train_errors_all, val_errors_all = [], []
 
 for epoch in range(num_epochs):
     model.train()
-    train_loss = 0.0
+    epoch_train_loss, epoch_train_errors = 0.0, []
+
     for batch in train_loader:
         x = batch[0].to(device)
         optimizer.zero_grad()
@@ -70,21 +134,112 @@ for epoch in range(num_epochs):
         loss = criterion(y, x)
         loss.backward()
         optimizer.step()
-        train_loss += loss.item()
-    train_losses.append(train_loss / len(train_loader))
+        epoch_train_loss += loss.item()
+        epoch_train_errors.extend(((y - x)**2).mean(dim=[1, 2, 3]).detach().cpu().numpy())
+
+    train_losses.append(epoch_train_loss / len(train_loader))
+    train_errors_all.extend(epoch_train_errors)
 
     model.eval()
-    val_loss = 0.0
+    epoch_val_loss, epoch_val_errors = 0.0, []
+
     with torch.no_grad():
         for batch in val_loader:
             x = batch[0].to(device)
             y = model(x)
             loss = criterion(y, x)
-            val_loss += loss.item()
-    val_losses.append(val_loss / len(val_loader))
-    scheduler.step(val_losses[-1])
+            epoch_val_loss += loss.item()
+            epoch_val_errors.extend(((y - x)**2).mean(dim=[1, 2, 3]).cpu().numpy())
 
-    print(f"[{epoch+1}/{num_epochs}] Train Loss: {train_losses[-1]:.6f}, Val Loss: {val_losses[-1]:.6f}")
+    val_losses.append(epoch_val_loss / len(val_loader))
+    val_errors_all.extend(epoch_val_errors)
+    scheduler.step(epoch_val_loss)
 
-torch.save(model.state_dict(), "/home/kristyna/Desktop/autoencoder_ET_wave4_trial14.pth")
-print("Model saved.")
+    print(f"[Epoch {epoch+1}/{num_epochs}] Train Loss: {train_losses[-1]:.6f}, Val Loss: {val_losses[-1]:.6f}")
+
+# --------------------------
+# Save Model
+# --------------------------
+model_path = "/home/kristyna/Desktop/autoencoder_ET_0Hz_param2_paper2.pth"
+torch.save(model.state_dict(), model_path)
+print(f"Model saved to {model_path}")
+
+# --------------------------
+# Plot Losses
+# --------------------------
+plt.figure(figsize=(10, 5))
+plt.plot(train_losses, label="Train Loss")
+plt.plot(val_losses, label="Validation Loss")
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+plt.title("Training and Validation Loss")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig("train_val_loss_curve_trial13.pdf")
+plt.show()
+
+# --------------------------
+# Evaluation: Test Set
+# --------------------------
+noise_only_errors = []
+model.eval()
+with torch.no_grad():
+    for batch in test_loader:
+        x = batch[0].to(device)
+        y = model(x)
+        batch_errors = ((y - x) ** 2).mean(dim=[1, 2, 3])
+        noise_only_errors.extend(batch_errors.cpu().numpy())
+
+threshold = np.mean(noise_only_errors) + 2 * np.std(noise_only_errors)
+threshold3 = np.mean(noise_only_errors) + 3 * np.std(noise_only_errors)
+threshold5 = np.mean(noise_only_errors) + 5 * np.std(noise_only_errors)
+
+print(f"Anomaly detection threshold: {threshold:.6f}")
+print(f"Anomaly detection threshold3: {threshold3:.10f}")
+print(f"Anomaly detection threshold5: {threshold5:.10f}")
+
+# --------------------------
+# Load Anomaly Data and Compute Errors
+# --------------------------
+anomaly_folder = "/home/kristyna/Desktop/ET_noise_final_injections/Noise30_100/injection_3000_5000pc_0hz"
+anomaly_waveforms = load_all_from_folder(anomaly_folder)
+anomaly_spectrograms = preprocess_waveforms_to_spectrograms(anomaly_waveforms)
+anomaly_spectrograms = torch.nn.functional.interpolate(anomaly_spectrograms.unsqueeze(1), size=(256, 31))
+
+anomaly_loader = DataLoader(TensorDataset(anomaly_spectrograms), batch_size=32, shuffle=False)
+
+signal_errors = []
+model.eval()
+with torch.no_grad():
+    for batch in anomaly_loader:
+        x = batch[0].to(device)
+        y = model(x)
+        batch_errors = ((y - x) ** 2).mean(dim=[1, 2, 3])
+        signal_errors.extend(batch_errors.cpu().numpy())
+
+custom_threshold = (max(noise_only_errors) - min(signal_errors)) / 2
+print(f"Custom threshold (max noise - min signal)/2: {custom_threshold:.6f}")
+
+# --------------------------
+# Plot: Histogram
+# --------------------------
+plt.figure(figsize=(10, 6))
+plt.hist(noise_only_errors, bins=50, alpha=0.7, label='Noise-Only Errors', color='cornflowerblue')
+plt.hist(signal_errors, bins=50, alpha=0.7, label='Signal+Noise Errors', color='orange')
+plt.axvline(threshold, color='red', linestyle='--', label='2σ Threshold')
+plt.axvline(threshold3, color='darkred', linestyle='--', label='3σ Threshold')
+plt.axvline(threshold5, color='purple', linestyle='--', label='5σ Threshold')
+plt.axvline(custom_threshold, color='green', linestyle='--', label='Custom Threshold')
+plt.xlabel("Reconstruction Error")
+plt.ylabel("Frequency")
+plt.title("Distribution of Reconstruction Errors")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig("comparison_histogram_noise_vs_signal.pdf")
+plt.show()
+
+end_time = time.time()
+elapsed_time = end_time - start_time
+print(f"Total runtime: {elapsed_time / 60:.2f} minutes")
