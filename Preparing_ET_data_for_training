@@ -10,13 +10,6 @@ output_folder = "/home/kristyna/Desktop/ET_segments_waveforms_final"
 os.makedirs(output_folder, exist_ok=True)
 batch_size = 1000
 
-# --- Highpass filtr ---
-def highpass_filter(data, cutoff=20, fs=sample_rate, order=6):
-    nyq = 0.5 * fs
-    normal_cutoff = cutoff / nyq
-    b, a = butter(order, normal_cutoff, btype='high', analog=False)
-    return filtfilt(b, a, data)
-
 # --- Whitening ---
 def whiten(data, f_psd, psd, fs):
     psd = np.maximum(psd, 1e-20)
