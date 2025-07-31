@@ -9,13 +9,6 @@ output_folder = "/home/kristyna/Desktop/ET_noise_final_injections/Noise50_100/in
 os.makedirs(output_folder, exist_ok=True)
 batch_size = 1000
 
-# === Highpass filtr ===
-def highpass_filter(data, cutoff=20, fs=sample_rate, order=6):
-    nyq = 0.5 * fs
-    normal_cutoff = cutoff / nyq
-    b, a = butter(order, normal_cutoff, btype='high')
-    return filtfilt(b, a, data)
-
 # === Whitening ===
 def whiten(data, f_psd, psd, fs):
     psd = np.maximum(psd, 1e-20)
@@ -63,7 +56,7 @@ for data_file in gwf_files:
                 approximant="IMRPhenomD",
                 mass1=m1, mass2=m2,
                 delta_t=1 / sample_rate,
-                f_lower=5,
+                f_lower=3,
                 distance=distance,
                 spin1z=0.0, spin2z=0.0,
                 eccentricity=0.0,
