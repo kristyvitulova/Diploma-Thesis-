@@ -1,4 +1,33 @@
 #Parametrization with weak supervision implementation
+#imports
+import numpy as np
+import os
+import sys
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.model_selection import train_test_split
+from scipy.signal import stft
+import matplotlib.pyplot as plt
+import random
+import glob
+from scipy.stats import norm
+from pycbc.waveform import get_td_waveform
+from gwpy.timeseries import TimeSeries
+from scipy.signal import spectrogram, welch, butter, filtfilt
+from scipy.fftpack import fft, ifft
+from scipy.signal import spectrogram
+from scipy.signal.windows import tukey
+import optuna
+
+# Check if GPU is available and set device
+if not torch.cuda.is_available():
+    print("No GPU available. Exiting...")
+    sys.exit(1)
+device = torch.device("cuda")
+print(f"Running on device: {torch.cuda.get_device_name(0)}")
+
 #Loading data
 data na spectrogramy def compute_spectrogram(waveform, nperseg=512, noverlap=256):
     f, t, Zxx = stft(waveform, fs=4096, nperseg=nperseg, noverlap=noverlap)
