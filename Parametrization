@@ -1,0 +1,88 @@
+#Parametrization with weak supervision implementation
+#Loading data
+data na spectrogramy def compute_spectrogram(waveform, nperseg=512, noverlap=256):
+    f, t, Zxx = stft(waveform, fs=4096, nperseg=nperseg, noverlap=noverlap)
+    spec = np.abs(Zxx)
+    if spec.shape[1] > 4:
+        spec = spec[:, 1:-1]
+    return spec
+
+def preprocess_waveforms_to_spectrograms(waveforms):
+    processed = []
+    for waveform in waveforms:
+        spec = compute_spectrogram(waveform.numpy())
+        min_val, max_val = np.min(spec), np.max(spec)
+        norm_spec = (spec - min_val) / (max_val - min_val) if max_val > min_val else np.zeros_like(spec)
+        processed.append(norm_spec)
+    return torch.tensor(processed, dtype=torch.float32)
+
+def load_all_from_folder(folder_path):
+    all_waveforms = []
+    for filename in sorted(os.listdir(folder_path)):
+        if filename.endswith('.pt'):
+            path = os.path.join(folder_path, filename)
+            data = torch.load(path)
+            waveforms = data.get('waveforms', data) if isinstance(data, dict) else data
+            all_waveforms.append(waveforms)
+    return torch.cat(all_waveforms)
+
+# Path to noise only data
+noise_folder = "/home/kristyna/Desktop/ET_segments_waveforms_final_cutoff0"
+
+# Load and process 
+noise_data = load_all_from_folder(noise_folder)
+noise_specs = preprocess_waveforms_to_spectrograms(noise_data)
+noise_specs = torch.nn.functional.interpolate(noise_specs.unsqueeze(1), size=(256, 31))
+
+# Separating the data into train and validation
+train_data, temp = train_test_split(noise_specs, test_size=0.3, random_state=42)
+val_data, _ = train_test_split(temp, test_size=0.5, random_state=42)
+
+train_loader = DataLoader(TensorDataset(train_data), batch_size=16, shuffle=True)
+val_loader = DataLoader(TensorDataset(val_data), batch_size=16, shuffle=False)
+
+#Parametrization
+def objective(trial):
+    lr = trial.suggest_float("lr", 1e-5, 6e-4, log=True)
+    dropout = trial.suggest_float("dropout", 0.005, 0.10)
+    weight_decay = trial.suggest_float("weight_decay", 1e-9, 1e-4, log=True)
+    epochs = trial.suggest_int("epochs", 45, 70)
+
+    model = DeeperAutoencoderWithRegularization(dropout).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    criterion = nn.MSELoss()
+
+    for _ in range(epochs):
+        model.train()
+        for batch in train_loader:
+            x = batch[0].to(device)
+            optimizer.zero_grad()
+            y = model(x)
+            loss = criterion(y, x)
+            loss.backward()
+            optimizer.step()
+
+    model.eval()
+    noise_loss, anomaly_loss = 0.0, 0.0
+    with torch.no_grad():
+        for batch in val_loader:
+            x = batch[0].to(device)
+            y = model(x)
+            noise_loss += criterion(y, x).item()
+        for batch in anomaly_loader:
+            x = batch[0].to(device)
+            y = model(x)
+            anomaly_loss += criterion(y, x).item()
+
+    noise_loss /= len(val_loader)
+    anomaly_loss /= len(anomaly_loader)
+
+    gap = (anomaly_loss - noise_loss) / (noise_loss + 1e-8)
+    print(f"Trial {trial.number} | Noise Loss: {noise_loss:.6f} | Anomaly Loss: {anomaly_loss:.6f} | Score: {-gap:.6f}")
+
+    return -gap
+
+study = optuna.create_study(direction="minimize")
+study.optimize(objective, n_trials=50)
+
+print("Best trial:", study.best_trial.params)
