@@ -1,0 +1,78 @@
+import os
+import numpy as np
+import torch
+from scipy.signal import welch, butter, filtfilt
+from pycbc.waveform import get_td_waveform
+from gwpy.timeseries import TimeSeries
+
+base_data_dir = "/home/kristyna/Desktop/ET/Noise.gwf"
+channel = "E1:STRAIN"
+sample_rate = 8192
+segment_duration = 2
+segment_length = sample_rate * segment_duration
+
+output_folder = "/home/.."
+os.makedirs(output_folder, exist_ok=True)
+batch_size = 1000
+
+# Whitening
+def whiten(data, f_psd, psd, fs):
+    psd = np.maximum(psd, 1e-20)
+    freqs = np.fft.fftfreq(len(data), d=1/fs)
+    psd_interp = np.interp(freqs, f_psd, psd)
+    white_fft = np.fft.fft(data) / np.sqrt(psd_interp)
+    return np.real(np.fft.ifft(white_fft))
+
+# GWF files
+gwf_files = []
+for root, _, files in os.walk(base_data_dir):
+    for file in sorted(files):
+        if file.endswith(".gwf"):
+            gwf_files.append(os.path.join(root, file))
+
+print(f"Found {len(gwf_files)} .gwf files to process.")
+
+# Processing
+current_batch = []
+batch_counter = 0
+
+for idx, data_file in enumerate(gwf_files, 1):
+    print(f"[{idx}/{len(gwf_files)}] Processing file: {data_file}")
+
+    try:
+        strain = TimeSeries.read(data_file, channel=channel)
+        f_psd, psd = welch(strain.value, fs=sample_rate, nperseg=4096)
+        num_segments = int((strain.times.value[-1] - strain.times.value[0]) // segment_duration)
+
+        for i in range(num_segments):
+            start = strain.times.value[0] + i * segment_duration
+            end = start + segment_duration
+            if end > strain.times.value[-1]:
+                break
+
+            segment = strain.crop(start, end).value
+            # highpass_filter(segment) odstraněn
+            segment = whiten(segment, f_psd, psd, sample_rate)
+
+            tensor = torch.tensor(segment, dtype=torch.float32).unsqueeze(0)  # [1, 8192]
+            current_batch.append(tensor)
+
+            if len(current_batch) >= batch_size:
+                batch_tensor = torch.cat(current_batch, dim=0)  # [batch_size, 8192]
+                save_path = os.path.join(output_folder, f"waveform_batch_{batch_counter:03d}.pt")
+                torch.save(batch_tensor, save_path)
+                print(f"Saved batch {batch_counter} with {len(current_batch)} waveform segments")
+                batch_counter += 1
+                current_batch = []
+
+    except Exception as e:
+        print(f"Error processing {data_file}: {e}")
+
+# Save last batch
+if current_batch:
+    batch_tensor = torch.cat(current_batch, dim=0)
+    save_path = os.path.join(output_folder, f"waveform_batch_{batch_counter:03d}.pt")
+    torch.save(batch_tensor, save_path)
+    print(f"Saved final batch {batch_counter} with {len(current_batch)} waveform segments")
+
+print("Done.")
