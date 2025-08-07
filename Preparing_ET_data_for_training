@@ -1,3 +1,35 @@
+#imports
+import numpy as np
+import os
+import sys
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.model_selection import train_test_split
+from scipy.signal import stft
+import matplotlib.pyplot as plt
+import random
+import glob
+from scipy.stats import norm
+from pycbc.waveform import get_td_waveform
+from gwpy.timeseries import TimeSeries
+from scipy.signal import spectrogram, welch, butter, filtfilt
+from scipy.fftpack import fft, ifft
+from scipy.signal import spectrogram
+from scipy.signal.windows import tukey
+from scipy.signal import welch, butter, filtfilt
+from scipy.fft import fft, ifft, rfft, irfft, rfftfreq
+from pycbc.waveform import get_td_waveform
+from gwpy.timeseries import TimeSeries
+
+# Check if GPU is available and set device
+if not torch.cuda.is_available():
+    print("No GPU available. Exiting...")
+    sys.exit(1)
+device = torch.device("cuda")
+print(f"Running on device: {torch.cuda.get_device_name(0)}")
+
 #generating ET noise
 # === Nastavení ===
 base_data_dir = "/home/kristyna/Desktop/Noise_final"
